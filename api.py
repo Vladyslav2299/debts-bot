@@ -67,11 +67,11 @@ async def main():
     async def fallback(m: types.Message):
         await m.answer('Нажми /start чтобы открыть проверку 👇')
 
-    # API — в том же event loop, без to_thread
+    # API — в том же event loop
     api_app = build_app(proxy=PROXY_URL)
     runner = web.AppRunner(api_app)
     await runner.setup()
-    port = int(os.getenv('WEBAPP_PORT', '8080'))
+    port = int(os.getenv('PORT', os.getenv('WEBAPP_PORT', '8080')))
     site = web.TCPSite(runner, host='0.0.0.0', port=port)
     await site.start()
 
