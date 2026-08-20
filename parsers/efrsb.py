@@ -1,16 +1,14 @@
-"""
-Парсер bankrot.fedresurs.ru — Единый федеральный реестр сведений о банкротстве.
-Поиск по физ. лицам.
-"""
+"""Парсер bankrot.fedresurs.ru — ЕФРСБ."""
 import asyncio
 import aiohttp
+from aiohttp_socks import ProxyConnector
 from bs4 import BeautifulSoup
 from fake_useragent import UserAgent
 
 UA = UserAgent()
 
 async def check_efrsb(session, fio: str, birth: str, proxy=None):
-    url = 'https://bankrot.fedresurs.ru/search?searchString='
+    url = 'https://bankrot.fedresurs.ru/search'
     headers = {
         'User-Agent': UA.random,
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -21,11 +19,20 @@ async def check_efrsb(session, fio: str, birth: str, proxy=None):
         'searchString': fio,
         'category': 'fiz',
     }
+
     try:
-        async with session.get(url, params=params, headers=headers, proxy=proxy, timeout=25) as r:
-            if r.status != 200:
-                return {'status': 'error', 'found': 0, 'total': 0, 'items': [], 'error': f'http_{r.status}'}
-            html = await r.text()
+        if proxy:
+            connector = ProxyConnector.from_url(proxy)
+            async with aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=25)) as s:
+                async with s.get(url, params=params, headers=headers) as r:
+                    if r.status != 200:
+                        return {'status': 'error', 'found': 0, 'total': 0, 'items': [], 'error': f'http_{r.status}'}
+                    html = await r.text()
+        else:
+            async with session.get(url, params=params, headers=headers, timeout=25) as r:
+                if r.status != 200:
+                    return {'status': 'error', 'found': 0, 'total': 0, 'items': [], 'error': f'http_{r.status}'}
+                html = await r.text()
     except asyncio.TimeoutError:
         return {'status': 'error', 'found': 0, 'total': 0, 'items': [], 'error': 'timeout'}
     except Exception as e:
@@ -49,7 +56,6 @@ async def check_efrsb(session, fio: str, birth: str, proxy=None):
                 items.append(t[:200])
         found = len(items)
 
-    # Капча
     if 'captcha' in html.lower() or 'введите символы' in html.lower():
         return {'status': 'error', 'found': 0, 'total': 0, 'items': [], 'error': 'captcha'}
 
@@ -57,5 +63,4 @@ async def check_efrsb(session, fio: str, birth: str, proxy=None):
         if any(p in text.lower() for p in ['не найдено', 'нет данных', 'по вашему запросу']):
             return {'status': 'clean', 'found': 0, 'total': 0, 'items': []}
         return {'status': 'clean', 'found': 0, 'total': 0, 'items': []}
-
     return {'status': 'found', 'found': found, 'total': 0, 'items': items[:20]}
