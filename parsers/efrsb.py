@@ -9,9 +9,14 @@ from urllib.parse import urlparse
 UA = UserAgent()
 
 def _make_connector(proxy_url):
+    """Создаёт ProxyConnector. Если схема не указана — по умолчанию socks5."""
     if not proxy_url:
         return None
+    if '://' not in proxy_url:
+        proxy_url = 'socks5://' + proxy_url
     p = urlparse(proxy_url)
+    if not p.hostname or not p.port:
+        return None
     return ProxyConnector(
         proxy_type=ProxyType.SOCKS5 if p.scheme == 'socks5' else ProxyType.HTTP,
         host=p.hostname,
@@ -34,18 +39,23 @@ async def check_efrsb(session, fio: str, birth: str, proxy=None):
     }
 
     try:
-        connector = _make_connector(proxy)
-        if connector:
-            async with aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=25)) as s:
-                async with s.get(url, params=params, headers=headers) as r:
-                    if r.status != 200:
-                        return {'status': 'error', 'found': 0, 'total': 0, 'items': [], 'error': f'http_{r.status}'}
-                    html = await r.text()
-        else:
-            async with session.get(url, params=params, headers=headers, timeout=25) as r:
+        own_session = False
+        if session is None:
+            connector = _make_connector(proxy)
+            if connector:
+                session = aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=25))
+            else:
+                session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=25))
+            own_session = True
+
+        try:
+            async with session.get(url, params=params, headers=headers) as r:
                 if r.status != 200:
                     return {'status': 'error', 'found': 0, 'total': 0, 'items': [], 'error': f'http_{r.status}'}
                 html = await r.text()
+        finally:
+            if own_session:
+                await session.close()
     except asyncio.TimeoutError:
         return {'status': 'error', 'found': 0, 'total': 0, 'items': [], 'error': 'timeout'}
     except Exception as e:
@@ -70,10 +80,4 @@ async def check_efrsb(session, fio: str, birth: str, proxy=None):
         found = len(items)
 
     if 'captcha' in html.lower() or 'введите символы' in html.lower():
-        return {'status': 'error', 'found': 0, 'total': 0, 'items': [], 'error': 'captcha'}
-
-    if not found:
-        if any(p in text.lower() for p in ['не найдено', 'нет данных', 'по вашему запросу']):
-            return {'status': 'clean', 'found': 0, 'total': 0, 'items': []}
-        return {'status': 'clean', 'found': 0, 'total': 0, 'items': []}
-    return {'status': 'found', 'found': found, 'total': 0, 'items': items[:20]}
+        return {'status': 'error', 'found': 0, 'total': 0, 'items': [],==
