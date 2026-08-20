@@ -1,11 +1,24 @@
 """Парсер e-dolgi.ru — агрегатор задолженностей."""
 import asyncio
 import aiohttp
-from aiohttp_socks import ProxyConnector
+from aiohttp_socks import ProxyConnector, ProxyType
 from bs4 import BeautifulSoup
 from fake_useragent import UserAgent
+from urllib.parse import urlparse
 
 UA = UserAgent()
+
+def _make_connector(proxy_url):
+    if not proxy_url:
+        return None
+    p = urlparse(proxy_url)
+    return ProxyConnector(
+        proxy_type=ProxyType.SOCKS5 if p.scheme == 'socks5' else ProxyType.HTTP,
+        host=p.hostname,
+        port=p.port,
+        username=p.username,
+        password=p.password,
+    )
 
 async def check_edolgi(session, fio: str, birth: str, region: str, proxy=None):
     url = 'https://e-dolgi.ru/'
@@ -25,8 +38,8 @@ async def check_edolgi(session, fio: str, birth: str, region: str, proxy=None):
     }
 
     try:
-        if proxy:
-            connector = ProxyConnector.from_url(proxy)
+        connector = _make_connector(proxy)
+        if connector:
             async with aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=25)) as s:
                 async with s.post(url, data=data, headers=headers) as r:
                     if r.status != 200:
