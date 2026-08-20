@@ -1,58 +1,83 @@
-"""Парсер bankrot.fedresurs.ru — ЕФРСБ."""
+"""Парсер efrsb.ru — Единый федеральный реестр сведений о банкротстве."""
 import asyncio
+import re
 import aiohttp
-from aiohttp_socks import ProxyConnector, ProxyType
 from bs4 import BeautifulSoup
 from fake_useragent import UserAgent
-from urllib.parse import urlparse
 
-UA = UserAgent()
+from .utils import make_connector, parse_amount, decode_response, normalize_date
 
-def _make_connector(proxy_url):
-    """Создаёт ProxyConnector. Если схема не указана — по умолчанию socks5."""
-    if not proxy_url:
-        return None
-    if '://' not in proxy_url:
-        proxy_url = 'socks5://' + proxy_url
-    p = urlparse(proxy_url)
-    if not p.hostname or not p.port:
-        return None
-    return ProxyConnector(
-        proxy_type=ProxyType.SOCKS5 if p.scheme == 'socks5' else ProxyType.HTTP,
-        host=p.hostname,
-        port=p.port,
-        username=p.username,
-        password=p.password,
-    )
+UA = UserAgent(fallback='Mozilla/5.0 (Windows NT 10.0; Win64; x64)')
 
-async def check_efrsb(session, fio: str, birth: str, proxy=None):
-    url = 'https://bankrot.fedresurs.ru/search'
+
+async def check_efrsb(session, fio: str, birth: str, region: str = None, proxy=None, timeout: int = 30):
+    # ВАЖНО: замените URL и параметры на реальные для efrsb.ru
+    url = 'https://bankrot.fedresurs.ru/'
     headers = {
         'User-Agent': UA.random,
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Accept-Language': 'ru-RU,ru;q=0.9',
-        'Referer': 'https://bankrot.fedresurs.ru/',
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Origin': url,
+        'Referer': url,
     }
-    params = {
-        'searchString': fio,
-        'category': 'fiz',
+
+    if not fio or not fio.strip():
+        return {'status': 'error', 'found': 0, 'total': 0, 'items': [], 'error': 'empty_fio'}
+
+    date_parts = normalize_date(birth)
+    if not date_parts:
+        return {'status': 'error', 'found': 0, 'total': 0, 'items': [], 'error': 'bad_birth'}
+    d, m, y = date_parts
+
+    # Параметры запроса (требуют уточнения)
+    data = {
+        'fio': fio.strip(),
+        'birthdate': f'{y}-{m}-{d}',
+        # 'region': region,  # если нужно
+        # другие поля...
     }
 
     try:
         own_session = False
         if session is None:
-            connector = _make_connector(proxy)
+            connector = make_connector(proxy)
             if connector:
-                session = aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=25))
+                session = aiohttp.ClientSession(
+                    connector=connector,
+                    timeout=aiohttp.ClientTimeout(total=timeout)
+                )
             else:
-                session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=25))
+                session = aiohttp.ClientSession(
+                    timeout=aiohttp.ClientTimeout(total=timeout)
+                )
             own_session = True
 
         try:
-            async with session.get(url, params=params, headers=headers) as r:
+            async with session.post(url, data=data, headers=headers, ssl=False) as r:
                 if r.status != 200:
                     return {'status': 'error', 'found': 0, 'total': 0, 'items': [], 'error': f'http_{r.status}'}
-                html = await r.text()
+                content = await r.read()
+
+                ct = r.headers.get('Content-Type', '')
+                if 'application/json' in ct:
+                    import json
+                    try:
+                        resp_json = json.loads(content.decode('utf-8', errors='ignore'))
+                        if isinstance(resp_json, dict):
+                            found = int(resp_json.get('found', 0))
+                            total = float(resp_json.get('total', 0))
+                            items = resp_json.get('items', [])
+                            return {
+                                'status': 'found' if found else 'clean',
+                                'found': found,
+                                'total': total,
+                                'items': items[:20],
+                            }
+                    except Exception:
+                        pass
+
+                html = decode_response(content, r.headers)
         finally:
             if own_session:
                 await session.close()
@@ -61,23 +86,39 @@ async def check_efrsb(session, fio: str, birth: str, proxy=None):
     except Exception as e:
         return {'status': 'error', 'found': 0, 'total': 0, 'items': [], 'error': str(e)[:120]}
 
-    soup = BeautifulSoup(html, 'lxml')
-    import re
+    soup = BeautifulSoup(html, 'html.parser')
     text = soup.get_text(' ', strip=True)
+
     found = 0
+    total = 0.0
     items = []
 
-    m = re.search(r'Найдено\s+(\d+)\s+(?:записей|результат)', text, re.IGNORECASE)
+    # Подберите актуальное регулярное выражение для количества
+    m = re.search(r'Найдено\s+(\d+)\s+(?:записей|должников|банкрот)', text, re.IGNORECASE)
     if m:
         found = int(m.group(1))
+        if found == 0:
+            return {'status': 'clean', 'found': 0, 'total': 0, 'items': []}
 
-    if not found:
-        cards = soup.select('.card, .result, .search-result, tr')
-        for c in cards:
-            t = c.get_text(' ', strip=True)
-            if t and any(kw in t.lower() for kw in ['должник', 'банкрот', 'арбитражный управляющий']):
-                items.append(t[:200])
+    # Сумма (если применимо)
+    m2 = re.search(r'на\s+сумму\s+([\d\s,.]+)\s*(?:руб|₽)', text, re.IGNORECASE)
+    if m2:
+        total = parse_amount(m2.group(1))
+
+    # Замените селекторы на реальные
+    blocks = soup.select('.result, .debt-item, .bankrupt-item, tr')
+    for b in blocks:
+        t = b.get_text(' ', strip=True)
+        if not t or re.search(r'Найдено\s+\d+', t):
+            continue
+        # Уточните ключевые слова для банкротств
+        if any(kw in t.lower() for kw in ['банкрот', 'должник', 'производство', 'торги']):
+            items.append(t[:200])
+
+    if not m and items:
         found = len(items)
 
-    if 'captcha' in html.lower() or 'введите символы' in html.lower():
-        return {'status': 'error', 'found': 0, 'total': 0, 'items': [],==
+    if found == 0 and not items:
+        return {'status': 'clean', 'found': 0, 'total': 0, 'items': []}
+
+    return {'status': 'found', 'found': found, 'total': total, 'items': items[:20]}
