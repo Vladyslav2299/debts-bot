@@ -4,6 +4,7 @@
 """
 import asyncio
 import logging
+import signal
 import sys
 import os
 
@@ -67,7 +68,21 @@ async def main():
     async def fallback(m: types.Message):
         await m.answer('Нажми /start чтобы открыть проверку 👇')
 
-    # API — в том же event loop
+    # --- Настройка graceful shutdown ---
+    loop = asyncio.get_running_loop()
+    stop_event = asyncio.Event()
+
+    def request_shutdown(signame: str):
+        log.info('Received signal %s, shutting down...', signame)
+        stop_event.set()
+
+    # Регистрируем обработчики для SIGINT и SIGTERM
+    for signame in ('SIGINT', 'SIGTERM'):
+        sig = getattr(signal, signame, None)
+        if sig:
+            loop.add_signal_handler(sig, request_shutdown, signame)
+
+    # --- Запуск API в том же event loop ---
     api_app = build_app(proxy=PROXY_URL)
     runner = web.AppRunner(api_app)
     await runner.setup()
@@ -77,17 +92,42 @@ async def main():
 
     log.info('Bot started, API on :%d, WEBAPP_URL=%s', port, WEBAPP_URL)
 
-    try:
-        await dp.start_polling(bot, handle_signals=False)
-    except (KeyboardInterrupt, SystemExit):
-        log.info('Shutting down...')
-    finally:
-        await bot.session.close()
-        await runner.cleanup()
+    # --- Запуск поллинга как отдельной задачи ---
+    polling_task = asyncio.create_task(
+        dp.start_polling(bot, handle_signals=False)
+    )
+
+    # Ждём либо сигнала остановки, либо завершения поллинга (например, из-за ошибки)
+    stop_waiter = asyncio.create_task(stop_event.wait())
+    await asyncio.wait(
+        [polling_task, stop_waiter],
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+
+    # Если поллинг ещё работает, останавливаем его
+    if not polling_task.done():
+        log.info('Stopping polling...')
+        await dp.stop_polling()
+        try:
+            await polling_task
+        except Exception:
+            log.exception('Error during polling shutdown')
+    else:
+        # Если поллинг завершился сам, проверяем наличие ошибки
+        exc = polling_task.exception()
+        if exc:
+            log.exception('Polling stopped with error', exc_info=exc)
+
+    # --- Закрытие ресурсов ---
+    log.info('Closing bot session and API runner...')
+    await bot.session.close()
+    await runner.cleanup()
+
+    log.info('Shutdown complete')
 
 
 if __name__ == '__main__':
     try:
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
-        pass
+        log.info('Interrupted')
