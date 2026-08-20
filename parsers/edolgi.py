@@ -1,8 +1,7 @@
-"""
-Парсер e-dolgi.ru — агрегатор задолженностей (ФССП, налоги, штрафы, ЖКХ).
-"""
+"""Парсер e-dolgi.ru — агрегатор задолженностей."""
 import asyncio
 import aiohttp
+from aiohttp_socks import ProxyConnector
 from bs4 import BeautifulSoup
 from fake_useragent import UserAgent
 
@@ -24,11 +23,20 @@ async def check_edolgi(session, fio: str, birth: str, region: str, proxy=None):
         'region': region,
         'action': 'search',
     }
+
     try:
-        async with session.post(url, data=data, headers=headers, proxy=proxy, timeout=25) as r:
-            if r.status != 200:
-                return {'status': 'error', 'found': 0, 'total': 0, 'items': [], 'error': f'http_{r.status}'}
-            html = await r.text()
+        if proxy:
+            connector = ProxyConnector.from_url(proxy)
+            async with aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=25)) as s:
+                async with s.post(url, data=data, headers=headers) as r:
+                    if r.status != 200:
+                        return {'status': 'error', 'found': 0, 'total': 0, 'items': [], 'error': f'http_{r.status}'}
+                    html = await r.text()
+        else:
+            async with session.post(url, data=data, headers=headers, timeout=25) as r:
+                if r.status != 200:
+                    return {'status': 'error', 'found': 0, 'total': 0, 'items': [], 'error': f'http_{r.status}'}
+                html = await r.text()
     except asyncio.TimeoutError:
         return {'status': 'error', 'found': 0, 'total': 0, 'items': [], 'error': 'timeout'}
     except Exception as e:
@@ -51,7 +59,6 @@ async def check_edolgi(session, fio: str, birth: str, region: str, proxy=None):
         except Exception:
             pass
 
-    # Если счётчика нет — собираем блоки результата
     if not found:
         blocks = soup.select('.result, .debt, .item, li')
         for b in blocks:
@@ -64,5 +71,4 @@ async def check_edolgi(session, fio: str, birth: str, region: str, proxy=None):
         if any(p in text.lower() for p in ['не найдено', 'нет задолженност', 'по вашему запросу']):
             return {'status': 'clean', 'found': 0, 'total': 0, 'items': []}
         return {'status': 'clean', 'found': 0, 'total': 0, 'items': []}
-
     return {'status': 'found', 'found': found, 'total': total, 'items': items[:20]}
