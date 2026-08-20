@@ -1,5 +1,6 @@
 """Парсер fssprus.net — агрегатор ФССП."""
 import asyncio
+import ssl
 import aiohttp
 from aiohttp_socks import ProxyConnector, ProxyType
 from bs4 import BeautifulSoup
@@ -18,6 +19,7 @@ def _make_connector(proxy_url):
         port=p.port,
         username=p.username,
         password=p.password,
+        ssl=False,
     )
 
 async def check_fssprus_net(session, fio: str, birth: str, region: str, proxy=None):
@@ -30,9 +32,16 @@ async def check_fssprus_net(session, fio: str, birth: str, region: str, proxy=No
         'Origin': 'https://fssprus.net',
         'Referer': 'https://fssprus.net/',
     }
+
+    try:
+        d, m, y = birth.split('.')
+        birth_iso = f'{y}-{m}-{d}'
+    except Exception:
+        return {'status': 'error', 'found': 0, 'total': 0, 'items': [], 'error': 'bad_birth'}
+
     data = {
         'fio': fio,
-        'birthdate': birth,
+        'birthdate': birth_iso,
         'region': region,
         'search': 'Поиск',
     }
@@ -40,13 +49,16 @@ async def check_fssprus_net(session, fio: str, birth: str, region: str, proxy=No
     try:
         connector = _make_connector(proxy)
         if connector:
-            async with aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=25)) as s:
-                async with s.post(url, data=data, headers=headers) as r:
+            async with aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=30)) as s:
+                async with s.post(url, data=data, headers=headers, ssl=False) as r:
                     if r.status != 200:
                         return {'status': 'error', 'found': 0, 'total': 0, 'items': [], 'error': f'http_{r.status}'}
                     html = await r.text()
         else:
-            async with session.post(url, data=data, headers=headers, timeout=25) as r:
+            ssl_ctx = ssl.create_default_context()
+            ssl_ctx.check_hostname = False
+            ssl_ctx.verify_mode = ssl.CERT_NONE
+            async with session.post(url, data=data, headers=headers, timeout=30, ssl=ssl_ctx) as r:
                 if r.status != 200:
                     return {'status': 'error', 'found': 0, 'total': 0, 'items': [], 'error': f'http_{r.status}'}
                 html = await r.text()
@@ -56,12 +68,12 @@ async def check_fssprus_net(session, fio: str, birth: str, region: str, proxy=No
         return {'status': 'error', 'found': 0, 'total': 0, 'items': [], 'error': str(e)[:120]}
 
     soup = BeautifulSoup(html, 'lxml')
-    items = []
+    import re
+    text = soup.get_text(' ', strip=True)
     found = 0
     total = 0.0
-    import re
+    items = []
 
-    text = soup.get_text(' ', strip=True)
     m = re.search(r'Найдено\s+(\d+)\s+(?:исполнительн|производств)', text, re.IGNORECASE)
     if m:
         found = int(m.group(1))
