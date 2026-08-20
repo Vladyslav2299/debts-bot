@@ -1,67 +1,93 @@
 """
-HTTP-сервер (aiohttp) с одним endpoint POST /api/check.
-Запускается рядом с ботом на порту 8080 (или WEBAPP_PORT из .env).
-Все запросы — без логов на диск, в памяти.
+Точка входа: Telegram-бот (aiogram 3) + HTTP API (aiohttp).
+Один процесс, один event loop.
 """
 import asyncio
-import json
 import logging
+import sys
+import os
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import CommandStart
+from aiogram.types import WebAppInfo, InlineKeyboardMarkup, InlineKeyboardButton
 from aiohttp import web
-import aiohttp
 
-from config import HTTP_TIMEOUT
-from parsers import check_fssprus_su, check_fssprus_net, check_edolgi, check_efrsb
-
-log = logging.getLogger('api')
+from config import BOT_TOKEN, WEBAPP_URL, PROXY_URL, LOG_LEVEL
+from api import build_app
 
 
-async def handle_check(request: web.Request) -> web.Response:
-    try:
-        data = await request.json()
-    except Exception:
-        return web.json_response({'error': 'bad_json'}, status=400)
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL),
+    format='%(asctime)s %(levelname)s %(name)s | %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)],
+)
+log = logging.getLogger('main')
 
-    fio = (data.get('fio') or '').strip()
-    birth = (data.get('birth') or '').strip()
-    region = (data.get('region') or '').strip()
-    inn = (data.get('inn') or '').strip()
 
-    if not fio or not birth or not region:
-        return web.json_response({'error': 'fio_birth_region_required'}, status=400)
+async def main():
+    if not BOT_TOKEN:
+        raise SystemExit('BOT_TOKEN is empty. Set it in .env')
 
-    proxy = request.app['proxy']
-    timeout = aiohttp.ClientTimeout(total=HTTP_TIMEOUT)
-    conn = aiohttp.TCPConnector(limit=20, ssl=False)
-    async with aiohttp.ClientSession(timeout=timeout, connector=conn) as session:
-        results = await asyncio.gather(
-            check_fssprus_su(session, fio, birth, proxy=proxy),
-            check_fssprus_net(session, fio, birth, region, proxy=proxy),
-            check_edolgi(session, fio, birth, region, proxy=proxy),
-            check_efrsb(session, fio, birth, proxy=proxy),
-            return_exceptions=True,
+    bot = Bot(token=BOT_TOKEN)
+    dp = Dispatcher()
+
+    @dp.message(CommandStart())
+    async def cmd_start(m: types.Message):
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text='🔍 Открыть проверку', web_app=WebAppInfo(url=WEBAPP_URL))],
+            [InlineKeyboardButton(text='ℹ️ Как это работает', callback_data='help')],
+        ])
+        await m.answer(
+            '👋 Привет!\n\n'
+            'Этот бот проверяет задолженности и банкротство по 4 источникам:\n'
+            '• ФССП (fssprus.su)\n'
+            '• ФССП (fssprus.net)\n'
+            '• Е-Долги\n'
+            '• ЕФРСБ\n\n'
+            'Без логов, каждый запрос — свежий.\n\n'
+            'Нажми кнопку ниже, чтобы открыть:',
+            reply_markup=kb
         )
-    out = {}
-    for key, res in zip(['fssprus_su', 'fssprus_net', 'edolgi', 'efrsb'], results):
-        if isinstance(res, Exception):
-            out[key] = {'status': 'error', 'found': 0, 'total': 0, 'items': [], 'error': str(res)[:120]}
-        else:
-            out[key] = res
-    return web.json_response({'results': out})
+
+    @dp.callback_query(F.data == 'help')
+    async def help_cb(c: types.CallbackQuery):
+        await c.message.answer(
+            '📋 Что делает бот:\n'
+            '• Принимает ФИО + дату рождения + регион (+ ИНН опционально)\n'
+            '• Параллельно опрашивает 4 источника\n'
+            '• Показывает количество производств и суммы\n'
+            '• НЕ сохраняет данные — всё в памяти, при перезагрузке чисто\n\n'
+            '⚠️ Это неофициальный инструмент, данные могут расходиться с гос. источниками.'
+        )
+        await c.answer()
+
+    @dp.message()
+    async def fallback(m: types.Message):
+        await m.answer('Нажми /start чтобы открыть проверку 👇')
+
+    # API — в том же event loop, без to_thread
+    api_app = build_app(proxy=PROXY_URL)
+    runner = web.AppRunner(api_app)
+    await runner.setup()
+    port = int(os.getenv('WEBAPP_PORT', '8080'))
+    site = web.TCPSite(runner, host='0.0.0.0', port=port)
+    await site.start()
+
+    log.info('Bot started, API on :%d, WEBAPP_URL=%s', port, WEBAPP_URL)
+
+    try:
+        await dp.start_polling(bot, handle_signals=False)
+    except (KeyboardInterrupt, SystemExit):
+        log.info('Shutting down...')
+    finally:
+        await bot.session.close()
+        await runner.cleanup()
 
 
-async def handle_health(request: web.Request) -> web.Response:
-    return web.json_response({'ok': True})
-
-
-def build_app(proxy=None) -> web.Application:
-    app = web.Application()
-    app['proxy'] = proxy
-    app.router.add_post('/api/check', handle_check)
-    app.router.add_get('/health', handle_health)
-    return app
-
-
-def run_api(proxy=None, host='0.0.0.0', port=8080):
-    logging.basicConfig(level=logging.INFO)
-    app = build_app(proxy=proxy)
-    web.run_app(app, host=host, port=port, print=lambda *a, **k: log.info(' '.join(str(x) for x in a)))
+if __name__ == '__main__':
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        pass
