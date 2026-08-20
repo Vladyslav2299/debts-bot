@@ -1,10 +1,7 @@
-"""
-Парсер fssp.gov.ru (fssprus.su).
-Использует публичную форму поиска по физ. лицам.
-Возвращает: {status, found, total, items, error}
-"""
+"""Парсер fssp.gov.ru (fssprus.su)."""
 import asyncio
 import aiohttp
+from aiohttp_socks import ProxyConnector
 from bs4 import BeautifulSoup
 from fake_useragent import UserAgent
 
@@ -19,7 +16,7 @@ async def check_fssprus_su(session, fio: str, birth: str, proxy=None):
         'Referer': 'https://fssp.gov.ru/iss/',
         'Content-Type': 'application/x-www-form-urlencoded',
     }
-    # Преобразуем дату 07.02.2001 -> 2001-02-07
+
     try:
         d, m, y = birth.split('.')
         birth_iso = f'{y}-{m}-{d}'
@@ -41,28 +38,33 @@ async def check_fssprus_su(session, fio: str, birth: str, proxy=None):
         'region_id': '-1',
         'search_type': 'fiz',
     }
+
     try:
-        async with session.post(url, data=data, headers=headers, proxy=proxy, timeout=25) as r:
-            if r.status != 200:
-                return {'status': 'error', 'found': 0, 'total': 0, 'items': [], 'error': f'http_{r.status}'}
-            html = await r.text()
+        if proxy:
+            connector = ProxyConnector.from_url(proxy)
+            async with aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=25)) as s:
+                async with s.post(url, data=data, headers=headers) as r:
+                    if r.status != 200:
+                        return {'status': 'error', 'found': 0, 'total': 0, 'items': [], 'error': f'http_{r.status}'}
+                    html = await r.text()
+        else:
+            async with session.post(url, data=data, headers=headers, timeout=25) as r:
+                if r.status != 200:
+                    return {'status': 'error', 'found': 0, 'total': 0, 'items': [], 'error': f'http_{r.status}'}
+                html = await r.text()
     except asyncio.TimeoutError:
         return {'status': 'error', 'found': 0, 'total': 0, 'items': [], 'error': 'timeout'}
     except Exception as e:
         return {'status': 'error', 'found': 0, 'total': 0, 'items': [], 'error': str(e)[:120]}
 
     soup = BeautifulSoup(html, 'lxml')
-
-    # Капча
     if 'captcha' in html.lower() or 'введите символы' in html.lower():
         return {'status': 'error', 'found': 0, 'total': 0, 'items': [], 'error': 'captcha'}
 
-    # Счётчик
     found = 0
     total = 0
     items = []
 
-    # Ищем строки таблицы исполнительных производств
     rows = soup.select('table.search-results tr') or soup.select('tr[class*="result"]')
     for row in rows:
         text = row.get_text(' ', strip=True)
@@ -72,7 +74,6 @@ async def check_fssprus_su(session, fio: str, birth: str, proxy=None):
             items.append(text[:200])
             found += 1
 
-    # Альтернативно: блок с количеством
     cnt_block = soup.find(string=lambda s: s and 'Найдено' in s and 'производств' in s)
     if cnt_block:
         import re
@@ -80,7 +81,6 @@ async def check_fssprus_su(session, fio: str, birth: str, proxy=None):
         if m:
             found = int(m.group(1))
 
-    # Сумма
     sum_block = soup.find(string=lambda s: s and 'сумма' in s.lower())
     if sum_block:
         import re
