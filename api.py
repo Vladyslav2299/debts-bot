@@ -14,12 +14,21 @@ from parsers import check_fssprus_su, check_fssprus_net, check_edolgi, check_efr
 
 log = logging.getLogger('api')
 
+CORS_HEADERS = {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type',
+}
+
 
 async def handle_check(request: web.Request) -> web.Response:
+    if request.method == 'OPTIONS':
+        return web.Response(status=204, headers=CORS_HEADERS)
+
     try:
         data = await request.json()
     except Exception:
-        return web.json_response({'error': 'bad_json'}, status=400)
+        return web.json_response({'error': 'bad_json'}, status=400, headers=CORS_HEADERS)
 
     fio = (data.get('fio') or '').strip()
     birth = (data.get('birth') or '').strip()
@@ -27,7 +36,7 @@ async def handle_check(request: web.Request) -> web.Response:
     inn = (data.get('inn') or '').strip()
 
     if not fio or not birth or not region:
-        return web.json_response({'error': 'fio_birth_region_required'}, status=400)
+        return web.json_response({'error': 'fio_birth_region_required'}, status=400, headers=CORS_HEADERS)
 
     proxy = request.app['proxy']
     timeout = aiohttp.ClientTimeout(total=HTTP_TIMEOUT)
@@ -46,11 +55,13 @@ async def handle_check(request: web.Request) -> web.Response:
             out[key] = {'status': 'error', 'found': 0, 'total': 0, 'items': [], 'error': str(res)[:120]}
         else:
             out[key] = res
-    return web.json_response({'results': out})
+    return web.json_response({'results': out}, headers=CORS_HEADERS)
 
 
 async def handle_health(request: web.Request) -> web.Response:
-    return web.json_response({'ok': True})
+    if request.method == 'OPTIONS':
+        return web.Response(status=204, headers=CORS_HEADERS)
+    return web.json_response({'ok': True}, headers=CORS_HEADERS)
 
 
 def build_app(proxy=None) -> web.Application:
@@ -58,6 +69,8 @@ def build_app(proxy=None) -> web.Application:
     app['proxy'] = proxy
     app.router.add_post('/api/check', handle_check)
     app.router.add_get('/health', handle_health)
+    app.router.add_route('OPTIONS', '/api/check', handle_check)
+    app.router.add_route('OPTIONS', '/health', handle_health)
     return app
 
 
