@@ -1,6 +1,6 @@
 """
-Точка входа: запуск Telegram-бота (aiogram 3) + HTTP-сервера для Mini App.
-Один процесс, asyncio. Без логов на диск — всё в stdout.
+Точка входа: запуск Telegram-бота (aiogram 3).
+Без HTTP API-сервера (для Render Free).
 """
 import asyncio
 import logging
@@ -15,7 +15,6 @@ from aiogram.filters import CommandStart
 from aiogram.types import WebAppInfo, InlineKeyboardMarkup, InlineKeyboardButton
 
 from config import BOT_TOKEN, WEBAPP_URL, PROXY_URL, LOG_LEVEL
-from api import run_api
 
 
 logging.basicConfig(
@@ -67,13 +66,11 @@ async def main():
     async def fallback(m: types.Message):
         await m.answer('Нажми /start чтобы открыть проверку 👇')
 
-    # Параллельно: бот + HTTP API
-    api_task = asyncio.create_task(asyncio.to_thread(run_api, proxy=PROXY_URL, host='0.0.0.0', port=int(os.getenv('WEBAPP_PORT', '8080'))))
-    polling_task = asyncio.create_task(dp.start_polling(bot, handle_signals=False))
-
-    log.info('Bot started, API on :8080, WEBAPP_URL=%s', WEBAPP_URL)
+    log.info('Bot started, WEBAPP_URL=%s', WEBAPP_URL)
+    
+    # Только polling, без HTTP API
     try:
-        await asyncio.gather(api_task, polling_task)
+        await dp.start_polling(bot, handle_signals=False)
     except (KeyboardInterrupt, SystemExit):
         log.info('Shutting down...')
     finally:
