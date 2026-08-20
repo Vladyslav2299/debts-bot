@@ -30,9 +30,16 @@ async def check_edolgi(session, fio: str, birth: str, region: str, proxy=None):
         'Origin': 'https://e-dolgi.ru',
         'Referer': 'https://e-dolgi.ru/',
     }
+
+    try:
+        d, m, y = birth.split('.')
+        birth_iso = f'{y}-{m}-{d}'
+    except Exception:
+        return {'status': 'error', 'found': 0, 'total': 0, 'items': [], 'error': 'bad_birth'}
+
     data = {
         'fio': fio,
-        'birthdate': birth,
+        'birthdate': birth_iso,
         'region': region,
         'action': 'search',
     }
@@ -40,13 +47,13 @@ async def check_edolgi(session, fio: str, birth: str, region: str, proxy=None):
     try:
         connector = _make_connector(proxy)
         if connector:
-            async with aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=25)) as s:
+            async with aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=30)) as s:
                 async with s.post(url, data=data, headers=headers) as r:
                     if r.status != 200:
                         return {'status': 'error', 'found': 0, 'total': 0, 'items': [], 'error': f'http_{r.status}'}
                     html = await r.text()
         else:
-            async with session.post(url, data=data, headers=headers, timeout=25) as r:
+            async with session.post(url, data=data, headers=headers, timeout=30) as r:
                 if r.status != 200:
                     return {'status': 'error', 'found': 0, 'total': 0, 'items': [], 'error': f'http_{r.status}'}
                 html = await r.text()
