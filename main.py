@@ -1,20 +1,21 @@
 """
-Точка входа: запуск Telegram-бота (aiogram 3).
-Без HTTP API-сервера (для Render Free).
+Точка входа: Telegram-бот (aiogram 3) + HTTP API (aiohttp).
+Один процесс, один event loop.
 """
 import asyncio
 import logging
 import sys
 import os
 
-# Фикс: добавляем корень проекта в sys.path для импорта config/parsers
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart
 from aiogram.types import WebAppInfo, InlineKeyboardMarkup, InlineKeyboardButton
+from aiohttp import web
 
 from config import BOT_TOKEN, WEBAPP_URL, PROXY_URL, LOG_LEVEL
+from api import build_app
 
 
 logging.basicConfig(
@@ -66,15 +67,23 @@ async def main():
     async def fallback(m: types.Message):
         await m.answer('Нажми /start чтобы открыть проверку 👇')
 
-    log.info('Bot started, WEBAPP_URL=%s', WEBAPP_URL)
-    
-    # Только polling, без HTTP API
+    # API — в том же event loop
+    api_app = build_app(proxy=PROXY_URL)
+    runner = web.AppRunner(api_app)
+    await runner.setup()
+    port = int(os.getenv('PORT', os.getenv('WEBAPP_PORT', '8080')))
+    site = web.TCPSite(runner, host='0.0.0.0', port=port)
+    await site.start()
+
+    log.info('Bot started, API on :%d, WEBAPP_URL=%s', port, WEBAPP_URL)
+
     try:
         await dp.start_polling(bot, handle_signals=False)
     except (KeyboardInterrupt, SystemExit):
         log.info('Shutting down...')
     finally:
         await bot.session.close()
+        await runner.cleanup()
 
 
 if __name__ == '__main__':
