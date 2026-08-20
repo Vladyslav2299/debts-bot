@@ -1,4 +1,4 @@
-"""Парсер fssp.gov.ru (fssprus.su)."""
+"""Парсер fssprus.su — агрегатор ФССП."""
 import asyncio
 import aiohttp
 from aiohttp_socks import ProxyConnector, ProxyType
@@ -21,13 +21,10 @@ def _make_connector(proxy_url):
     )
 
 async def check_fssprus_su(session, fio: str, birth: str, proxy=None):
-    url = 'https://fssp.gov.ru/iss/siteml'
     headers = {
         'User-Agent': UA.random,
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Accept-Language': 'ru-RU,ru;q=0.9',
-        'Referer': 'https://fssp.gov.ru/iss/',
-        'Content-Type': 'application/x-www-form-urlencoded',
     }
 
     try:
@@ -36,74 +33,72 @@ async def check_fssprus_su(session, fio: str, birth: str, proxy=None):
     except Exception:
         return {'status': 'error', 'found': 0, 'total': 0, 'items': [], 'error': 'bad_birth'}
 
-    parts = fio.split()
-    last = parts[0] if len(parts) > 0 else ''
-    first = parts[1] if len(parts) > 1 else ''
-    middle = parts[2] if len(parts) > 2 else ''
-
-    data = {
-        'is': '',
-        'dosubs': '1',
-        'name': last,
-        'firstname': first,
-        'secondname': middle,
-        'birthdate': birth_iso,
-        'region_id': '-1',
-        'search_type': 'fiz',
-    }
-
     try:
         connector = _make_connector(proxy)
         if connector:
-            async with aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=25)) as s:
-                async with s.post(url, data=data, headers=headers) as r:
-                    if r.status != 200:
-                        return {'status': 'error', 'found': 0, 'total': 0, 'items': [], 'error': f'http_{r.status}'}
-                    html = await r.text()
+            s = aiohttp.ClientSession(connector=connector, timeout=aiohttp.ClientTimeout(total=30))
         else:
-            async with session.post(url, data=data, headers=headers, timeout=25) as r:
+            s = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30))
+
+        try:
+            # 1. GET — получить CSRF-токен
+            async with s.get('https://fssprus.su/', headers=headers) as r:
+                html = await r.text()
+                soup = BeautifulSoup(html, 'lxml')
+                csrf = soup.select_one('input[name="_csrf-frontend"]')
+                csrf_token = csrf['value'] if csrf else ''
+
+            if not csrf_token:
+                await s.close()
+                return {'status': 'error', 'found': 0, 'total': 0, 'items': [], 'error': 'no_csrf'}
+
+            # 2. POST — поиск
+            data = {
+                '_csrf-frontend': csrf_token,
+                'tabs': 'fiz',
+                'fio': fio,
+                'inputBirthDay': birth,
+                'email': '',
+                'regionNumberID': '',
+            }
+            headers['Content-Type'] = 'application/x-www-form-urlencoded'
+            headers['Referer'] = 'https://fssprus.su/'
+
+            async with s.post('https://fssprus.su/iss', data=data, headers=headers) as r:
                 if r.status != 200:
+                    await s.close()
                     return {'status': 'error', 'found': 0, 'total': 0, 'items': [], 'error': f'http_{r.status}'}
                 html = await r.text()
+        finally:
+            await s.close()
     except asyncio.TimeoutError:
         return {'status': 'error', 'found': 0, 'total': 0, 'items': [], 'error': 'timeout'}
     except Exception as e:
         return {'status': 'error', 'found': 0, 'total': 0, 'items': [], 'error': str(e)[:120]}
 
     soup = BeautifulSoup(html, 'lxml')
-    if 'captcha' in html.lower() or 'введите символы' in html.lower():
-        return {'status': 'error', 'found': 0, 'total': 0, 'items': [], 'error': 'captcha'}
+    import re
+    text = soup.get_text(' ', strip=True)
 
     found = 0
-    total = 0
+    total = 0.0
     items = []
 
-    rows = soup.select('table.search-results tr') or soup.select('tr[class*="result"]')
+    # Ищем записи о задолженностях
+    rows = soup.select('table tr, .result-item, .debt-item')
     for row in rows:
-        text = row.get_text(' ', strip=True)
-        if not text or 'Найдено' in text:
-            continue
-        if any(kw in text for kw in ['Исполнительное производство', 'Должник', 'Задолженность']):
-            items.append(text[:200])
-            found += 1
+        t = row.get_text(' ', strip=True)
+        if t and any(kw in t.lower() for kw in ['должник', 'задолженность', 'исполнительное', 'производство', 'сумма']):
+            items.append(t[:200])
 
-    cnt_block = soup.find(string=lambda s: s and 'Найдено' in s and 'производств' in s)
-    if cnt_block:
-        import re
-        m = re.search(r'Найдено\s+(\d+)\s+производств', cnt_block)
-        if m:
-            found = int(m.group(1))
+    # Попытка найти количество
+    m = re.search(r'Найдено\s+(\d+)\s+(?:исполнительн|производств|записей)', text, re.IGNORECASE)
+    if m:
+        found = int(m.group(1))
 
-    sum_block = soup.find(string=lambda s: s and 'сумма' in s.lower())
-    if sum_block:
-        import re
-        m = re.search(r'([\d\s]+(?:[.,]\d+)?)\s*(?:руб|₽)', sum_block)
-        if m:
-            try:
-                total = float(m.group(1).replace(' ', '').replace(',', '.'))
-            except Exception:
-                pass
+    if not found:
+        found = len(items)
 
     if found == 0 and not items:
         return {'status': 'clean', 'found': 0, 'total': 0, 'items': []}
-    return {'status': 'found', 'found': found or len(items), 'total': total, 'items': items[:20]}
+    return {'status': 'found', 'found': found, 'total': total, 'items': items[:20]}
